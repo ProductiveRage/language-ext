@@ -97,7 +97,7 @@ namespace LanguageExt
             var r = RunIO();
             return r.IsSucc && f(r.Value);
         }
-
+        
         [Pure, MethodImpl(AffOpt.mops)]
         public bool ForAll(Func<A, bool> f)
         {

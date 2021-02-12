@@ -8,12 +8,15 @@ using LanguageExt.Common;
 namespace LanguageExt.Thunks
 {
     /// <summary>
-    /// Lazily evaluates an asynchronous function and then memoizes the value
-    /// Runs at most once
+    /// Lazily evaluates a synchronous function and then memoizes the value
     /// </summary>
+    /// <remarks>
+    /// Highly optimised to reduce memory allocation as much as possible, needs no locks,
+    /// and runs at most once.  Can be run again by creating a clone of the thunk and re-evaluating
+    /// </remarks>
     public class Thunk<Env, A>
     {
-        internal readonly Func<Env, Fin<A>> fun;
+        internal readonly Func<Env, ThunkR<A>> fun;
         internal volatile int state;
         internal Error error;
         internal A value;
@@ -22,8 +25,22 @@ namespace LanguageExt.Thunks
         /// Construct a lazy thunk
         /// </summary>
         [Pure, MethodImpl(Thunk.mops)]
-        public static Thunk<Env, A> Lazy(Func<Env, Fin<A>> fun) =>
+        public static Thunk<Env, A> Lazy(Func<Env, ThunkR<A>> fun) =>
             new Thunk<Env, A>(fun);
+
+        /// <summary>
+        /// Construct a lazy thunk
+        /// </summary>
+        [Pure, MethodImpl(Thunk.mops)]
+        public static Thunk<Env, A> Lazy(Func<Env, Fin<A>> fun) =>
+            new Thunk<Env, A>(env => ThunkR<A>.Result(fun(env)));
+
+        /// <summary>
+        /// Construct a lazy thunk
+        /// </summary>
+        [Pure, MethodImpl(Thunk.mops)]
+        public static Thunk<Env, A> Lazy(Func<Env, A> fun) =>
+            new Thunk<Env, A>(env => ThunkR<A>.Succ(fun(env)));
 
         /// <summary>
         /// Construct an error Thunk
@@ -64,14 +81,14 @@ namespace LanguageExt.Thunks
         /// Lazy constructor
         /// </summary>
         [MethodImpl(Thunk.mops)]
-        Thunk(Func<Env, Fin<A>> fun) =>
+        Thunk(Func<Env, ThunkR<A>> fun) =>
             this.fun = fun ?? throw new ArgumentNullException(nameof(value));
 
         /// <summary>
         /// Value accessor
         /// </summary>
         [Pure, MethodImpl(Thunk.mops)]
-        public Fin<A> Value(Env env) =>
+        public ThunkR<A> Value(Env env) =>
             Eval(env ?? throw new ArgumentNullException(nameof(value)));
 
         /// <summary>
@@ -115,7 +132,7 @@ namespace LanguageExt.Thunks
                                 }
                                 else
                                 {
-                                    return Fin<B>.Succ(f(ev.data.Right));
+                                    return ThunkR<B>.Succ(f(ev.Value.data.Right));
                                 }
                             });
 
@@ -156,8 +173,8 @@ namespace LanguageExt.Thunks
                             {
                                 var ev = fun(e);
                                 return ev.IsFail
-                                    ? Fin<B>.Fail(Fail(ev.Error))
-                                    : Fin<B>.Succ(Succ(ev.data.Right));
+                                    ? ThunkR<B>.Fail(Fail(ev.Value.Error))
+                                    : ThunkR<B>.Succ(Succ(ev.Value.data.Right));
                             });
 
                         case Thunk.IsCancelled:
@@ -181,7 +198,7 @@ namespace LanguageExt.Thunks
         /// the vast majority of the time.
         /// </summary>
         [Pure]
-        Fin<A> Eval(Env env)
+        ThunkR<A> Eval(Env env)
         {
             while (true)
             {
@@ -192,13 +209,13 @@ namespace LanguageExt.Thunks
                         var v = fun(env);
                         if (v.IsFail)
                         {
-                            error = v.Error;
+                            error = v.Value.Error;
                             state = Thunk.IsFailed; // state update must be last thing before return
                             return v;
                         }
                         else
                         {
-                            value = v.Value;
+                            value = v.Value.Value;
                             state = Thunk.IsSuccess; // state update must be last thing before return
                             return v;
                         }
@@ -209,7 +226,7 @@ namespace LanguageExt.Thunks
                         state = e.Message == Thunk.CancelledText // state update must be last thing before return
                             ? Thunk.IsCancelled
                             : Thunk.IsFailed; 
-                        return Fin<A>.Fail(Error.New(e));
+                        return ThunkR<A>.Fail(Error.New(e));
                     }
                 }
                 else
@@ -224,11 +241,11 @@ namespace LanguageExt.Thunks
                         case Thunk.Evaluating: 
                             continue;
                         case Thunk.IsSuccess: 
-                            return Fin<A>.Succ(value);
+                            return ThunkR<A>.Succ(value);
                         case Thunk.IsCancelled: 
-                            return Fin<A>.Fail(Error.New(Thunk.CancelledText));
+                            return ThunkR<A>.Fail(Error.New(Thunk.CancelledText));
                         case Thunk.IsFailed:
-                            return Fin<A>.Fail(error);
+                            return ThunkR<A>.Fail(error);
                         default:
                             throw new InvalidOperationException("should never happen");
                     }

@@ -11,11 +11,14 @@ namespace LanguageExt.Thunks
 {
     /// <summary>
     /// Lazily evaluates an asynchronous function and then memoizes the value
-    /// Runs at most once
     /// </summary>
+    /// <remarks>
+    /// Highly optimised to reduce memory allocation as much as possible, needs no locks,
+    /// and runs at most once.  Can be run again by creating a clone of the thunk and re-evaluating
+    /// </remarks>
     public class ThunkAsync<Env, A> where Env : struct, HasCancel<Env>
     {
-        internal readonly Func<Env, ValueTask<Fin<A>>> fun;
+        internal readonly Func<Env, ValueTask<ThunkR<A>>> fun;
         internal volatile int state;
         internal Error error;
         internal A value;
@@ -24,15 +27,22 @@ namespace LanguageExt.Thunks
         /// Construct a lazy thunk
         /// </summary>
         [Pure, MethodImpl(Thunk.mops)]
-        public static ThunkAsync<Env, A> Lazy(Func<Env, ValueTask<Fin<A>>> fun) =>
+        public static ThunkAsync<Env, A> Lazy(Func<Env, ValueTask<ThunkR<A>>> fun) =>
             new ThunkAsync<Env, A>(fun);
+
+        /// <summary>
+        /// Construct a lazy thunk
+        /// </summary>
+        [Pure, MethodImpl(Thunk.mops)]
+        public static ThunkAsync<Env, A> Lazy(Func<Env, ValueTask<Fin<A>>> fun) =>
+            new ThunkAsync<Env, A>(async env => ThunkR<A>.Result(await fun(env).ConfigureAwait(false)));
 
         /// <summary>
         /// Construct a lazy ThunkAsync
         /// </summary>
         [Pure, MethodImpl(Thunk.mops)]
         public static ThunkAsync<Env, A> Lazy(Func<Env, ValueTask<A>> fun) =>
-            new ThunkAsync<Env, A>(async e => Fin<A>.Succ(await fun(e).ConfigureAwait(false)));
+            new ThunkAsync<Env, A>(async env => ThunkR<A>.Succ(await fun(env).ConfigureAwait(false)));
 
         /// <summary>
         /// Construct an error ThunkAsync
@@ -73,14 +83,14 @@ namespace LanguageExt.Thunks
         /// Lazy constructor
         /// </summary>
         [MethodImpl(Thunk.mops)]
-        ThunkAsync(Func<Env, ValueTask<Fin<A>>> fun) =>
+        ThunkAsync(Func<Env, ValueTask<ThunkR<A>>> fun) =>
             this.fun = fun ?? throw new ArgumentNullException(nameof(value));
 
         /// <summary>
         /// Value accessor
         /// </summary>
         [Pure, MethodImpl(Thunk.mops)]
-        public ValueTask<Fin<A>> Value(Env env) =>
+        public ValueTask<ThunkR<A>> Value(Env env) =>
             Eval(env);
         
         /// <summary>
@@ -115,7 +125,7 @@ namespace LanguageExt.Thunks
                         {
                             var fa = await Value(env).ConfigureAwait(false);
                             if (fa.IsFail) return fa.Cast<B>();
-                            return f(fa.Value);
+                            return ThunkR<B>.Succ(f(fa.Value.Value));
                         });
 
                     case Thunk.NotEvaluated:
@@ -128,7 +138,7 @@ namespace LanguageExt.Thunks
                             }
                             else
                             {
-                                return Fin<B>.Succ(f(ev.data.Right));
+                                return ThunkR<B>.Succ(f(ev.Value.data.Right));
                             }
                         });
 
@@ -166,8 +176,8 @@ namespace LanguageExt.Thunks
                         {
                             var fa = await Value(env).ConfigureAwait(false);
                             return fa.IsFail
-                                ? Fin<B>.Fail(Fail(fa.Error))
-                                : Succ(fa.Value);
+                                ? ThunkR<B>.Fail(Fail(fa.Value.Error))
+                                : ThunkR<B>.Succ(Succ(fa.Value.Value));
                         });
 
                     case Thunk.NotEvaluated:
@@ -175,8 +185,8 @@ namespace LanguageExt.Thunks
                         {
                             var ev = await fun(env).ConfigureAwait(false);
                             return ev.IsFail
-                                ? Fin<B>.Fail(Fail(ev.Error))
-                                : Fin<B>.Succ(Succ(ev.data.Right));
+                                ? ThunkR<B>.Fail(Fail(ev.Value.Error))
+                                : ThunkR<B>.Succ(Succ(ev.Value.data.Right));
                         });
 
                     case Thunk.IsCancelled:
@@ -206,7 +216,7 @@ namespace LanguageExt.Thunks
                 switch (state)
                 {
                     case Thunk.IsSuccess:
-                        return ThunkAsync<Env, B>.Lazy(async _ => await f(value).ConfigureAwait(false));
+                        return ThunkAsync<Env, B>.Lazy(async _ => ThunkR<B>.Succ(await f(value).ConfigureAwait(false)));
                     
                     case Thunk.NotEvaluated:
                         return ThunkAsync<Env, B>.Lazy(async env =>
@@ -218,7 +228,7 @@ namespace LanguageExt.Thunks
                             }
                             else
                             {
-                                return Fin<B>.Succ(await f(ev.data.Right).ConfigureAwait(false));
+                                return ThunkR<B>.Succ(await f(ev.Value.data.Right).ConfigureAwait(false));
                             }
                         });
 
@@ -233,7 +243,7 @@ namespace LanguageExt.Thunks
                         {
                             var fa = await Value(env).ConfigureAwait(false);
                             if (fa.IsFail) return fa.Cast<B>();
-                            return await f(fa.Value).ConfigureAwait(false);
+                            return ThunkR<B>.Succ(await f(fa.Value.Value).ConfigureAwait(false));
                         }); 
                     
                     default:
@@ -257,15 +267,15 @@ namespace LanguageExt.Thunks
                 switch (state)
                 {
                     case Thunk.IsSuccess:
-                        return ThunkAsync<Env, B>.Lazy(async _ => await Succ(value).ConfigureAwait(false));
+                        return ThunkAsync<Env, B>.Lazy(async _ => ThunkR<B>.Succ(await Succ(value).ConfigureAwait(false)));
                     
                     case Thunk.NotEvaluated:
                         return ThunkAsync<Env, B>.Lazy(async env =>
                         {
                             var ev = await fun(env).ConfigureAwait(false);
                             return ev.IsFail
-                                ? Fin<B>.Fail(await Fail(ev.Error).ConfigureAwait(false))
-                                : Fin<B>.Succ(await Succ(ev.Value).ConfigureAwait(false));
+                                ? ThunkR<B>.Fail(await Fail(ev.Value.Error).ConfigureAwait(false))
+                                : ThunkR<B>.Succ(await Succ(ev.Value.Value).ConfigureAwait(false));
                         });
 
                     case Thunk.IsCancelled:
@@ -279,8 +289,8 @@ namespace LanguageExt.Thunks
                         {
                             var fa = await Value(env).ConfigureAwait(false);
                             return fa.IsFail
-                                ? Fin<B>.Fail(await Fail(fa.Error).ConfigureAwait(false))
-                                : Fin<B>.Succ(await Succ(fa.Value).ConfigureAwait(false));
+                                ? ThunkR<B>.Fail(await Fail(fa.Value.Error).ConfigureAwait(false))
+                                : ThunkR<B>.Succ(await Succ(fa.Value.Value).ConfigureAwait(false));
                         }); 
                     
                     default:
@@ -289,7 +299,7 @@ namespace LanguageExt.Thunks
             }
             catch (Exception e)
             {
-                return ThunkAsync<Env, B>.Lazy(async env => Fin<B>.Fail(await Fail(e).ConfigureAwait(false)));
+                return ThunkAsync<Env, B>.Lazy(async env => ThunkR<B>.Fail(await Fail(e).ConfigureAwait(false)));
             }
         }
 
@@ -300,7 +310,7 @@ namespace LanguageExt.Thunks
         /// the vast majority of the time.
         /// </summary>
         [Pure, MethodImpl(Thunk.mops)]
-        async ValueTask<Fin<A>> Eval(Env env)
+        async ValueTask<ThunkR<A>> Eval(Env env)
         {
             while (true)
             {
@@ -316,19 +326,19 @@ namespace LanguageExt.Thunks
                         {
                             error = Error.New(Thunk.CancelledText);
                             state = Thunk.IsCancelled; // state update must be last thing before return
-                            return Fin<A>.Fail(error);
+                            return ThunkR<A>.Fail(error);
                         }
                         else if (vt.CompletedSuccessfully())
                         {
                             if (ex.IsFail)
                             {
-                                error = ex.Error;
+                                error = ex.Value.Error;
                                 state = Thunk.IsFailed; // state update must be last thing before return
                                 return ex;
                             }
                             else
                             {
-                                value = ex.Value;
+                                value = ex.Value.Value;
                                 state = Thunk.IsSuccess; // state update must be last thing before return
                                 return ex;
                             }
@@ -337,14 +347,14 @@ namespace LanguageExt.Thunks
                         {
                             error = Error.New(Thunk.CancelledText);
                             state = Thunk.IsCancelled; // state update must be last thing before return
-                            return Fin<A>.Fail(error);
+                            return ThunkR<A>.Fail(error);
                         }
                         else
                         {
                             var e = vt.AsTask().Exception;
                             error = e;
                             state = Thunk.IsFailed; // state update must be last thing before return
-                            return Fin<A>.Fail(error);
+                            return ThunkR<A>.Fail(error);
                         }
                     }
                     catch (Exception e)
@@ -353,7 +363,7 @@ namespace LanguageExt.Thunks
                         state = e.Message == Thunk.CancelledText // state update must be last thing before return
                             ? Thunk.IsCancelled
                             : Thunk.IsFailed; 
-                        return Fin<A>.Fail(Error.New(e));
+                        return ThunkR<A>.Fail(Error.New(e));
                     }
                 }
                 else
@@ -368,11 +378,11 @@ namespace LanguageExt.Thunks
                         case Thunk.Evaluating: 
                             continue;
                         case Thunk.IsSuccess: 
-                            return Fin<A>.Succ(value);
+                            return ThunkR<A>.Succ(value);
                         case Thunk.IsCancelled: 
-                            return Fin<A>.Fail(Error.New(Thunk.CancelledText));
+                            return ThunkR<A>.Fail(Error.New(Thunk.CancelledText));
                         case Thunk.IsFailed:
-                            return Fin<A>.Fail(Error.New(error));
+                            return ThunkR<A>.Fail(Error.New(error));
                         default:
                             throw new InvalidOperationException("should never happen");
                     }

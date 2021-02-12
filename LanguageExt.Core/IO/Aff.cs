@@ -33,14 +33,21 @@ namespace LanguageExt
         /// </summary>
         [Pure, MethodImpl(AffOpt.mops)]
         public ValueTask<Fin<A>> RunIO(in Env env) =>
-            thunk.Value(env);
+            thunk.Value(env).Map(ThunkR<A>.DisposeAcquired);
 
         /// <summary>
         /// Invoke the effect
         /// </summary>
         [MethodImpl(AffOpt.mops)]
         public async ValueTask RunUnitIO(Env env) =>
-            ignore(await thunk.Value(env).ConfigureAwait(false));
+            ignore(await thunk.Value(env).Map(ThunkR<A>.DisposeAcquired).ConfigureAwait(false));
+
+        /// <summary>
+        /// Invoke the effect
+        /// </summary>
+        [Pure, MethodImpl(AffOpt.mops)]
+        internal ValueTask<ThunkR<A>> InternalRunIO(in Env env) =>
+            thunk.Value(env);
 
         /// <summary>
         /// Launch the async process without awaiting the result
@@ -51,7 +58,7 @@ namespace LanguageExt
         {
             var t = thunk;
             return Aff<Env, Unit>(env => { 
-                ignore(t.Value(env));
+                ignore(t.Value(env).Map(ThunkR<A>.DisposeAcquired));
                 return unit.AsValueTask();
             });
         }
@@ -100,10 +107,10 @@ namespace LanguageExt
             new Aff<Env, A>(ThunkAsync<Env, A>.Lazy(
                 async env =>
                 {
-                    var ra = await ma.RunIO(env).ConfigureAwait(false);
+                    var ra = await ma.InternalRunIO(env).ConfigureAwait(false);
                     return ra.IsSucc
                         ? ra
-                        : await mb.RunIO(env).ConfigureAwait(false);
+                        : await mb.InternalRunIO(env).ConfigureAwait(false) + ra;
                 }));
 
         [Pure, MethodImpl(AffOpt.mops)]
